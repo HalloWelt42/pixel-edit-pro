@@ -35,8 +35,8 @@ from PyQt6.QtGui import (
 # Konstanten
 ICON_SIZE = 32
 BUTTON_HEIGHT = 40
-MIN_GRID_SIZE = 4
-MAX_GRID_SIZE = 256
+MIN_GRID_SIZE = 16
+MAX_GRID_SIZE = 64
 MAX_UNDO_STEPS = 100
 SETTINGS_FILE = "pixel_editor_settings.json"
 
@@ -801,12 +801,14 @@ class ColorPalette(QWidget):
             x = col * self.cell_size
             y = user_start_y + row * self.cell_size
 
+            # Mark this as user color area for draw_color_cell
+            self.selected_is_user = True
             self.draw_color_cell(painter, x, y, color, i == self.selected_index and self.selected_is_user)
 
     def draw_color_cell(self, painter, x, y, color, selected):
         rect = QRect(x, y, self.cell_size, self.cell_size)
 
-        # Draw transparency pattern for transparent colors
+        # Draw transparency pattern for transparent/empty colors
         if color.alpha() < 255:
             painter.fillRect(rect, QColor(255, 255, 255))
             painter.fillRect(QRect(x, y, self.cell_size // 2, self.cell_size // 2), QColor(200, 200, 200))
@@ -814,6 +816,15 @@ class ColorPalette(QWidget):
                                    self.cell_size // 2, self.cell_size // 2), QColor(200, 200, 200))
 
         painter.fillRect(rect, color)
+
+        # Draw "+" for empty user slots
+        if color.alpha() == 0 and hasattr(self, 'selected_is_user'):
+            painter.setPen(QPen(QColor(150, 150, 150), 2))
+            center_x = x + self.cell_size // 2
+            center_y = y + self.cell_size // 2
+            size = self.cell_size // 3
+            painter.drawLine(center_x - size, center_y, center_x + size, center_y)
+            painter.drawLine(center_x, center_y - size, center_x, center_y + size)
 
         if selected:
             painter.setPen(QPen(Qt.GlobalColor.black, 2))
@@ -823,42 +834,53 @@ class ColorPalette(QWidget):
             painter.drawRect(rect)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            x = event.pos().x() // self.cell_size
-            y = event.pos().y() // self.cell_size
+        x = event.pos().x() // self.cell_size
+        y = event.pos().y() // self.cell_size
 
-            # Check if in material colors
-            material_rows = (len(self.material_colors) + self.columns - 1) // self.columns
-            if y < material_rows:
-                index = y * self.columns + x
-                if 0 <= index < len(self.material_colors):
+        # Check if in material colors
+        material_rows = (len(self.material_colors) + self.columns - 1) // self.columns
+        if y < material_rows:
+            index = y * self.columns + x
+            if 0 <= index < len(self.material_colors):
+                self.selected_index = index
+                self.selected_is_user = False
+                self.colorSelected.emit(self.material_colors[index])
+                self.update()
+        else:
+            # Check if in user colors
+            separator_rows = material_rows * self.cell_size + 10
+            user_y = (event.pos().y() - separator_rows) // self.cell_size
+            if user_y >= 0:
+                index = user_y * self.columns + x
+                if 0 <= index < len(self.user_colors):
                     self.selected_index = index
-                    self.selected_is_user = False
-                    self.colorSelected.emit(self.material_colors[index])
-                    self.update()
-            else:
-                # Check if in user colors
-                separator_rows = material_rows * self.cell_size + 10
-                user_y = (event.pos().y() - separator_rows) // self.cell_size
-                if user_y >= 0:
-                    index = user_y * self.columns + x
-                    if 0 <= index < len(self.user_colors):
-                        self.selected_index = index
-                        self.selected_is_user = True
+                    self.selected_is_user = True
 
-                        if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                            # Ctrl+Click to set new color
-                            color = QColorDialog.getColor(
-                                self.user_colors[index], self,
-                                "Choose Color",
-                                QColorDialog.ColorDialogOption.ShowAlphaChannel
-                            )
-                            if color.isValid():
-                                self.user_colors[index] = color
-                                self.colorSelected.emit(color)
-                        else:
+                    if event.button() == Qt.MouseButton.RightButton:
+                        # Right-click to set new color
+                        color = QColorDialog.getColor(
+                            self.user_colors[index], self,
+                            "Choose Color",
+                            QColorDialog.ColorDialogOption.ShowAlphaChannel
+                        )
+                        if color.isValid():
+                            self.user_colors[index] = color
+                            self.colorSelected.emit(color)
+                    elif event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                        # Ctrl+Click to set new color (alternative)
+                        color = QColorDialog.getColor(
+                            self.user_colors[index], self,
+                            "Choose Color",
+                            QColorDialog.ColorDialogOption.ShowAlphaChannel
+                        )
+                        if color.isValid():
+                            self.user_colors[index] = color
+                            self.colorSelected.emit(color)
+                    else:
+                        # Normal click to select color
+                        if self.user_colors[index].alpha() > 0:  # Only select if not empty
                             self.colorSelected.emit(self.user_colors[index])
-                        self.update()
+                    self.update()
 
     def add_color(self, color):
         # Add to first empty user slot
@@ -1165,7 +1187,10 @@ class PixelEditor(QMainWindow):
         layout.addLayout(color_layout)
 
         # Palette
-        layout.addWidget(QLabel("Palette (Ctrl+Click on user colors to edit):"))
+        layout.addWidget(QLabel("Palette:"))
+        palette_info = QLabel("(Right-click or Ctrl+Click on user colors to edit)")
+        palette_info.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addWidget(palette_info)
         self.palette = ColorPalette()
         self.palette.colorSelected.connect(self.set_primary_color)
         layout.addWidget(self.palette)
