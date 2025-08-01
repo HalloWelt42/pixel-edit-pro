@@ -35,8 +35,8 @@ from PyQt6.QtGui import (
 # Konstanten
 ICON_SIZE = 32
 BUTTON_HEIGHT = 40
-MIN_GRID_SIZE = 16
-MAX_GRID_SIZE = 64
+MIN_GRID_SIZE = 4
+MAX_GRID_SIZE = 256
 MAX_UNDO_STEPS = 100
 SETTINGS_FILE = "pixel_editor_settings.json"
 
