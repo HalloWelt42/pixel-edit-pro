@@ -1,9 +1,9 @@
 {
-  "grid_size": 16,
+  "grid_size": 24,
   "show_grid": true,
   "blur_mode": false,
   "pen_width": 1,
-  "primary_color": "#9c27b0",
+  "primary_color": "#000000",
   "secondary_color": "#d284bc",
   "palette": {
     "material": [
@@ -64,9 +64,9 @@
     ]
   },
   "window_geometry": {
-    "x": 100,
-    "y": 34,
-    "width": 1200,
-    "height": 795
+    "x": 0,
+    "y": 0,
+    "width": 1920,
+    "height": 1080
   }
 }
