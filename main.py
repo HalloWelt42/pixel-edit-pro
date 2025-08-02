@@ -9,6 +9,7 @@ Entwickelt mit PyQt6 und modernem Python3
 import sys
 import json
 import numpy as np
+import math
 from enum import Enum
 from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
@@ -134,6 +135,10 @@ class PixelCanvas(QWidget):
         self.cell_size = 20
         self.virtual_size = grid_size * 3  # Virtual canvas size for move operations
 
+        # Initialize undo/redo stacks BEFORE creating layers
+        self.undo_stack = []
+        self.redo_stack = []
+
         # Initialize layers with virtual size
         self.layers = []
         self.add_initial_layer()
@@ -149,9 +154,6 @@ class PixelCanvas(QWidget):
         self.last_pos = None
         self.preview_pixmap = None
         self.polygon_points = []
-
-        self.undo_stack = []
-        self.redo_stack = []
 
         self.background_color = QColor(200, 200, 200)
         self.show_grid = True
@@ -179,6 +181,9 @@ class PixelCanvas(QWidget):
         painter.end()
 
         self.layers = [Layer("Background", pixmap)]
+
+        # Initialize undo stack with initial state
+        self.save_state()
 
     def get_virtual_offset(self):
         """Get offset for virtual canvas"""
@@ -245,6 +250,24 @@ class PixelCanvas(QWidget):
             self.update()
 
     def save_state(self):
+        # Don't save if no changes have been made
+        if len(self.undo_stack) > 0:
+            last_state = self.undo_stack[-1]
+            current_matches = True
+            if len(last_state) == len(self.layers):
+                for i, layer in enumerate(self.layers):
+                    if (layer.name != last_state[i]['name'] or
+                            layer.visible != last_state[i]['visible'] or
+                            layer.opacity != last_state[i]['opacity'] or
+                            layer.pixmap.toImage() != last_state[i]['pixmap'].toImage()):
+                        current_matches = False
+                        break
+            else:
+                current_matches = False
+
+            if current_matches:
+                return  # No changes, don't save
+
         if len(self.undo_stack) >= MAX_UNDO_STEPS:
             self.undo_stack.pop(0)
 
@@ -260,7 +283,7 @@ class PixelCanvas(QWidget):
         self.redo_stack.clear()
 
     def undo(self):
-        if len(self.undo_stack) > 1:
+        if len(self.undo_stack) > 1:  # Keep at least one state
             self.redo_stack.append(self.undo_stack.pop())
             state = self.undo_stack[-1]
             self.restore_state(state)
@@ -362,7 +385,10 @@ class PixelCanvas(QWidget):
                                     "Cannot draw on hidden layer. Please make it visible first.")
                 return
 
-            self.save_state()
+            # Save state BEFORE any drawing operation
+            if self.draw_mode != DrawMode.PICKER:  # Don't save state for color picking
+                self.save_state()
+
             self.drawing = True
             self.last_pos = pixel_pos
 
@@ -471,6 +497,7 @@ class PixelCanvas(QWidget):
         virtual_end = self.get_virtual_pos(end)
 
         painter = QPainter(self.layers[self.current_layer].pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # Pixel-perfect
 
         if self.blur_mode:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -480,9 +507,39 @@ class PixelCanvas(QWidget):
         else:
             painter.setPen(QPen(self.primary_color, self.pen_width))
 
-        painter.drawLine(virtual_start, virtual_end)
+        # Use Bresenham's line algorithm for pixel-perfect lines
+        if self.pen_width == 1 and not self.blur_mode:
+            self.draw_bresenham_line(painter, virtual_start, virtual_end)
+        else:
+            painter.drawLine(virtual_start, virtual_end)
+
         painter.end()
         self.update()
+
+    def draw_bresenham_line(self, painter, start, end):
+        """Bresenham's line algorithm for pixel-perfect lines"""
+        x0, y0 = start.x(), start.y()
+        x1, y1 = end.x(), end.y()
+
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+
+        while True:
+            painter.drawPoint(x0, y0)
+
+            if x0 == x1 and y0 == y1:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x0 += sx
+            if e2 < dx:
+                err += dx
+                y0 += sy
 
     def update_preview(self, current_pos):
         if not self.preview_pixmap:
@@ -509,10 +566,13 @@ class PixelCanvas(QWidget):
         elif self.draw_mode == DrawMode.RECTANGLE:
             rect = QRect(virtual_last, virtual_current).normalized()
             painter.setBrush(Qt.BrushStyle.NoBrush)
+            if self.pen_width == 1 and not self.blur_mode:
+                # Pixel-perfect rectangle
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             painter.drawRect(rect)
         elif self.draw_mode == DrawMode.FILLED_RECTANGLE:
             rect = QRect(virtual_last, virtual_current).normalized()
-            painter.drawRect(rect)
+            painter.fillRect(rect, self.primary_color)
         elif self.draw_mode in [DrawMode.CIRCLE, DrawMode.FILLED_CIRCLE]:
             # Hold Shift for perfect circle
             if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
@@ -528,13 +588,35 @@ class PixelCanvas(QWidget):
 
             if self.draw_mode == DrawMode.CIRCLE:
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(rect)
+                if self.pen_width == 1 and not self.blur_mode:
+                    # Better circle algorithm for pixel art
+                    self.draw_pixel_perfect_ellipse(painter, rect)
+                else:
+                    painter.drawEllipse(rect)
+            else:
+                # Filled ellipse/circle
+                painter.setBrush(QBrush(self.primary_color))
+                painter.drawEllipse(rect)
         elif self.draw_mode in [DrawMode.TRIANGLE, DrawMode.FILLED_TRIANGLE]:
-            points = [
-                virtual_last,
-                virtual_current,
-                QPoint(virtual_last.x(), virtual_current.y())
-            ]
+            # Better triangle with options
+            if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # Equilateral triangle
+                center_x = (virtual_last.x() + virtual_current.x()) // 2
+                width = abs(virtual_current.x() - virtual_last.x())
+                height = int(width * 0.866)  # sqrt(3)/2
+
+                points = [
+                    QPoint(center_x, virtual_last.y()),
+                    QPoint(virtual_last.x(), virtual_last.y() + height),
+                    QPoint(virtual_current.x(), virtual_last.y() + height)
+                ]
+            else:
+                # Right triangle
+                points = [
+                    virtual_last,
+                    virtual_current,
+                    QPoint(virtual_last.x(), virtual_current.y())
+                ]
             polygon = QPolygon(points)
             if self.draw_mode == DrawMode.TRIANGLE:
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -550,11 +632,66 @@ class PixelCanvas(QWidget):
             painter.end()
             self.update()
 
+    def draw_pixel_perfect_ellipse(self, painter, rect):
+        """Draw pixel-perfect ellipse using midpoint algorithm"""
+        cx = rect.center().x()
+        cy = rect.center().y()
+        rx = rect.width() // 2
+        ry = rect.height() // 2
+
+        # Midpoint ellipse algorithm
+        x = 0
+        y = ry
+        rx2 = rx * rx
+        ry2 = ry * ry
+        tworx2 = 2 * rx2
+        twory2 = 2 * ry2
+        p = 0
+        px = 0
+        py = tworx2 * y
+
+        # Plot initial points
+        self.plot_ellipse_points(painter, cx, cy, x, y)
+
+        # Region 1
+        p = round(ry2 - (rx2 * ry) + (0.25 * rx2))
+        while px < py:
+            x += 1
+            px += twory2
+            if p < 0:
+                p += ry2 + px
+            else:
+                y -= 1
+                py -= tworx2
+                p += ry2 + px - py
+            self.plot_ellipse_points(painter, cx, cy, x, y)
+
+        # Region 2
+        p = round(ry2 * (x + 0.5) * (x + 0.5) + rx2 * (y - 1) * (y - 1) - rx2 * ry2)
+        while y > 0:
+            y -= 1
+            py -= tworx2
+            if p > 0:
+                p += rx2 - py
+            else:
+                x += 1
+                px += twory2
+                p += rx2 - py + px
+            self.plot_ellipse_points(painter, cx, cy, x, y)
+
+    def plot_ellipse_points(self, painter, cx, cy, x, y):
+        """Plot symmetrical points for ellipse"""
+        painter.drawPoint(cx + x, cy + y)
+        painter.drawPoint(cx - x, cy + y)
+        painter.drawPoint(cx + x, cy - y)
+        painter.drawPoint(cx - x, cy - y)
+
     def draw_polygon(self):
         if len(self.polygon_points) < 3:
             return
 
         painter = QPainter(self.layers[self.current_layer].pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # Pixel-perfect
 
         if self.blur_mode:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -570,6 +707,23 @@ class PixelCanvas(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
 
         polygon = QPolygon(self.polygon_points)
+
+        # Option for regular polygons with Alt key
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier and len(self.polygon_points) >= 3:
+            # Convert to regular polygon
+            center = polygon.boundingRect().center()
+            radius = int(((self.polygon_points[0].x() - center.x()) ** 2 +
+                          (self.polygon_points[0].y() - center.y()) ** 2) ** 0.5)
+            sides = len(self.polygon_points)
+
+            regular_points = []
+            for i in range(sides):
+                angle = 2 * math.pi * i / sides - math.pi / 2
+                x = int(center.x() + radius * math.cos(angle))
+                y = int(center.y() + radius * math.sin(angle))
+                regular_points.append(QPoint(x, y))
+            polygon = QPolygon(regular_points)
+
         painter.drawPolygon(polygon)
         painter.end()
         self.update()
@@ -1107,20 +1261,20 @@ class PixelEditor(QMainWindow):
 
         self.tool_buttons = QButtonGroup()
         tools = [
-            ("✏", DrawMode.PENCIL, "Pencil"),
-            ("╱", DrawMode.LINE, "Line"),
-            ("□", DrawMode.RECTANGLE, "Rectangle"),
+            ("✏", DrawMode.PENCIL, "Pencil (P)"),
+            ("╱", DrawMode.LINE, "Line (L)"),
+            ("□", DrawMode.RECTANGLE, "Rectangle (R)"),
             ("■", DrawMode.FILLED_RECTANGLE, "Filled Rectangle"),
-            ("○", DrawMode.CIRCLE, "Circle (Shift for perfect circle)"),
-            ("●", DrawMode.FILLED_CIRCLE, "Filled Circle (Shift for perfect circle)"),
-            ("△", DrawMode.TRIANGLE, "Triangle"),
-            ("▲", DrawMode.FILLED_TRIANGLE, "Filled Triangle"),
-            ("⬟", DrawMode.POLYGON, "Polygon (Shift to finish)"),
-            ("⬢", DrawMode.FILLED_POLYGON, "Filled Polygon (Shift to finish)"),
-            ("🪣", DrawMode.FILL, "Fill"),
-            ("⌫", DrawMode.ERASER, "Eraser"),
-            ("💧", DrawMode.PICKER, "Color Picker"),
-            ("↔", DrawMode.MOVE, "Move Layer Content")
+            ("○", DrawMode.CIRCLE, "Circle/Ellipse (C)\nShift: Perfect circle"),
+            ("●", DrawMode.FILLED_CIRCLE, "Filled Circle/Ellipse\nShift: Perfect circle"),
+            ("△", DrawMode.TRIANGLE, "Triangle\nShift: Equilateral"),
+            ("▲", DrawMode.FILLED_TRIANGLE, "Filled Triangle\nShift: Equilateral"),
+            ("⬟", DrawMode.POLYGON, "Polygon\nShift: Finish\nAlt: Regular polygon"),
+            ("⬢", DrawMode.FILLED_POLYGON, "Filled Polygon\nShift: Finish\nAlt: Regular"),
+            ("🪣", DrawMode.FILL, "Fill (F)"),
+            ("⌫", DrawMode.ERASER, "Eraser (E)"),
+            ("💧", DrawMode.PICKER, "Color Picker (I)"),
+            ("↔", DrawMode.MOVE, "Move Layer Content (M)")
         ]
 
         for i, (icon, mode, tooltip) in enumerate(tools):
@@ -1180,7 +1334,7 @@ class PixelEditor(QMainWindow):
         # Transparent color button
         self.transparent_btn = QPushButton("T")
         self.transparent_btn.setFixedSize(30, 30)
-        self.transparent_btn.setToolTip("Set transparent")
+        self.transparent_btn.setToolTip("Transparenz setzen\nSetzt die Primärfarbe auf vollständig transparent")
         self.transparent_btn.clicked.connect(self.set_transparent_color)
         color_layout.addWidget(self.transparent_btn)
 
