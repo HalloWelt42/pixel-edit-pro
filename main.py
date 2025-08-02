@@ -36,8 +36,8 @@ from PyQt6.QtGui import (
 # Konstanten
 ICON_SIZE = 32
 BUTTON_HEIGHT = 40
-MIN_GRID_SIZE = 16
-MAX_GRID_SIZE = 64
+MIN_GRID_SIZE = 4
+MAX_GRID_SIZE = 256
 MAX_UNDO_STEPS = 100
 SETTINGS_FILE = "pixel_editor_settings.json"
 
@@ -1298,6 +1298,58 @@ class PixelEditor(QMainWindow):
         self.setup_shortcuts()
         self.load_settings()
 
+    def rename_layer_dialog(self, item):
+        """Show dialog to rename layer"""
+        row = self.layers_list.row(item)
+        current_name = self.canvas.layers[row].name
+
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Layer",
+            "New name:",
+            text=current_name
+        )
+
+        if ok and new_name:
+            self.canvas.layers[row].name = new_name
+            self.update_layers_list()
+
+    def create_layer_context_menu(self, position):
+        """Create context menu for layers"""
+        item = self.layers_list.itemAt(position)
+        if item is None:
+            return
+
+        menu = QMenu(self)
+
+        rename_action = QAction("Rename", self)
+        rename_action.triggered.connect(lambda: self.rename_layer_dialog(item))
+        menu.addAction(rename_action)
+
+        # Optional: Weitere Aktionen
+        menu.addSeparator()
+
+        duplicate_action = QAction("Duplicate", self)
+        duplicate_action.triggered.connect(lambda: self.duplicate_layer(self.layers_list.row(item)))
+        menu.addAction(duplicate_action)
+
+        menu.exec(self.layers_list.mapToGlobal(position))
+
+    def duplicate_layer(self, index):
+        """Duplicate a layer"""
+        if 0 <= index < len(self.canvas.layers):
+            original = self.canvas.layers[index]
+
+            # Create new layer with copied content
+            new_pixmap = original.pixmap.copy()
+            new_name = f"{original.name} copy"
+            new_layer = Layer(new_name, new_pixmap, original.visible, original.opacity)
+
+            # Insert after original
+            self.canvas.layers.insert(index + 1, new_layer)
+            self.canvas.current_layer = index + 1
+            self.update_layers_list()
+
     def setup_ui(self):
         # Central Widget
         central_widget = QWidget()
@@ -1608,8 +1660,11 @@ class PixelEditor(QMainWindow):
         layout.addLayout(palette_buttons)
 
         # Layers
-        layout.addWidget(QLabel("Layers (Double-click: visibility, Ctrl+Click: select):"))
+        layout.addWidget(QLabel("Layers (Double-click: visibility):"))
+        layout.addWidget(QLabel("Layers (Ctrl+Click: select):"))
         self.layers_list = QListWidget()
+        self.layers_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.layers_list.customContextMenuRequested.connect(self.create_layer_context_menu)
         self.layers_list.itemClicked.connect(self.select_layer)
         self.layers_list.itemDoubleClicked.connect(self.toggle_layer_visibility_ui)
         self.update_layers_list()
@@ -1866,24 +1921,27 @@ class PixelEditor(QMainWindow):
 
         # Update button style to show transparency better
         if color.alpha() < 255:
-            # Show with checkerboard pattern background
-            self.primary_color_btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background-image: 
-                        repeating-conic-gradient(#CCCCCC 0% 25%, #FFFFFF 0% 50%);
-                    background-size: 10px 10px;
-                    background-position: 0 0;
-                    border: 2px solid #888888;
-                }}
-                """
-            )
-            # Apply color overlay
+            # Create a pixmap with checkerboard pattern
             pixmap = QPixmap(48, 48)
-            pixmap.fill(color)
+            pixmap.fill(Qt.GlobalColor.transparent)
+
+            painter = QPainter(pixmap)
+            # Draw checkerboard
+            for i in range(0, 48, 8):
+                for j in range(0, 48, 8):
+                    if (i // 8 + j // 8) % 2 == 0:
+                        painter.fillRect(i, j, 8, 8, QColor(200, 200, 200))
+                    else:
+                        painter.fillRect(i, j, 8, 8, QColor(255, 255, 255))
+
+            # Draw color on top
+            painter.fillRect(0, 0, 48, 48, color)
+            painter.end()
+
             icon = QIcon(pixmap)
             self.primary_color_btn.setIcon(icon)
             self.primary_color_btn.setIconSize(QSize(48, 48))
+            self.primary_color_btn.setStyleSheet("border: 2px solid #888888;")
 
             # Update status bar
             self.statusBar().showMessage(f"Drawing with transparency (Alpha: {alpha_percent}%)")
