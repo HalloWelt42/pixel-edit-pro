@@ -164,6 +164,10 @@ class PixelCanvas(QWidget):
         self.move_offset = QPoint(0, 0)
         self.temp_move_pixmap = None
 
+        # Rotation preview
+        self.rotation_preview_angle = 0
+        self.rotation_preview_active = False
+
         # Macro recorder
         self.macro_recorder = MacroRecorder()
 
@@ -313,9 +317,13 @@ class PixelCanvas(QWidget):
 
         offset = self.get_virtual_offset()
 
-        # Draw layers (only visible area)
-        for layer in self.layers:
+        # Draw layers (only visible area) - but hide current layer if rotating
+        for i, layer in enumerate(self.layers):
             if layer.visible:
+                # Skip current layer if we're showing rotation preview
+                if i == self.current_layer and self.rotation_preview_active and self.rotation_preview_angle != 0:
+                    continue
+
                 # Extract visible area from virtual canvas
                 visible_area = layer.pixmap.copy(offset, offset, self.grid_size, self.grid_size)
                 scaled = visible_area.scaled(
@@ -325,6 +333,35 @@ class PixelCanvas(QWidget):
                 )
                 painter.setOpacity(layer.opacity)
                 painter.drawPixmap(0, 0, scaled)
+
+        # Draw rotation preview
+        if self.rotation_preview_active and self.rotation_preview_angle != 0:
+            painter.setOpacity(self.layers[self.current_layer].opacity * 0.8)  # Slightly transparent
+
+            # Get current layer content
+            current_layer = self.layers[self.current_layer]
+            visible_area = current_layer.pixmap.copy(offset, offset, self.grid_size, self.grid_size)
+
+            # Apply rotation
+            transform = QTransform()
+            transform.translate(visible_area.width() / 2, visible_area.height() / 2)
+            transform.rotate(self.rotation_preview_angle)
+            transform.translate(-visible_area.width() / 2, -visible_area.height() / 2)
+
+            rotated = visible_area.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+
+            # Scale and center the rotated preview
+            scaled_rotated = rotated.scaled(
+                self.width(), self.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation
+            )
+
+            x = (self.width() - scaled_rotated.width()) // 2
+            y = (self.height() - scaled_rotated.height()) // 2
+            painter.drawPixmap(x, y, scaled_rotated)
+
+            painter.setOpacity(1.0)
 
         # Draw preview
         if self.preview_pixmap:
@@ -885,7 +922,9 @@ class PixelCanvas(QWidget):
 
     def rotate_layer(self, angle):
         """Rotate current layer by angle"""
-        self.save_state()
+        # Don't save state if this is just a preview
+        if not hasattr(self, 'rotation_preview_active') or not self.rotation_preview_active:
+            self.save_state()
 
         current_layer = self.layers[self.current_layer]
         offset = self.get_virtual_offset()
@@ -1243,11 +1282,6 @@ class PixelEditor(QMainWindow):
         self.setup_shortcuts()
         self.load_settings()
 
-    def merge_layers(self):
-        """Merge selected layers"""
-        self.canvas.merge_selected_layers()
-        self.update_layers_list()
-
     def setup_ui(self):
         # Central Widget
         central_widget = QWidget()
@@ -1378,6 +1412,7 @@ class PixelEditor(QMainWindow):
         self.rotation_slider.setFixedWidth(200)
         self.rotation_slider.setTickInterval(45)
         self.rotation_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.rotation_slider.sliderPressed.connect(lambda: setattr(self.canvas, 'rotation_preview_active', True))
         self.rotation_slider.valueChanged.connect(self.preview_rotation)
         self.rotation_slider.sliderReleased.connect(self.apply_rotation)
         transform_toolbar.addWidget(self.rotation_slider)
@@ -1416,17 +1451,15 @@ class PixelEditor(QMainWindow):
 
         # Reset button
         reset_transform_btn = QPushButton("Reset")
+        reset_transform_btn.setToolTip("Reset rotation preview without applying")
         reset_transform_btn.clicked.connect(self.reset_rotation)
         transform_toolbar.addWidget(reset_transform_btn)
 
         # Store reference
         self.transform_toolbar = transform_toolbar
 
-        # Rotation preview
+        # Initialize rotation preview
         self.rotation_preview_angle = 0
-        self.rotation_timer = QTimer()
-        self.rotation_timer.timeout.connect(self.update_rotation_preview)
-        self.rotation_timer.setSingleShot(True)
 
     def create_tools_panel(self):
         panel = QWidget()
@@ -1787,6 +1820,11 @@ class PixelEditor(QMainWindow):
         )
         if color.isValid():
             self.set_secondary_color(color)
+
+    def merge_layers(self):
+        """Merge selected layers"""
+        self.canvas.merge_selected_layers()
+        self.update_layers_list()
 
     def set_primary_color(self, color):
         self.canvas.primary_color = color
@@ -2154,22 +2192,24 @@ class PixelEditor(QMainWindow):
 
     def preview_rotation(self, angle):
         """Preview rotation in real-time"""
+        # Store the angle for preview
         self.rotation_preview_angle = angle
+        self.canvas.rotation_preview_angle = angle
+        self.canvas.rotation_preview_active = True
 
         # Snap to 45° increments if Shift is pressed
         if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             angle = round(angle / 45) * 45
             self.rotation_slider.setValue(angle)
+            self.canvas.rotation_preview_angle = angle
 
         self.rotation_label.setText(f"{angle}°")
 
-        # Update preview with a slight delay to improve performance
-        self.rotation_timer.stop()
-        self.rotation_timer.start(50)  # 50ms delay
+        # Update preview immediately
+        self.canvas.update()
 
     def update_rotation_preview(self):
         """Update the rotation preview"""
-        # TODO: Implement preview overlay
         self.canvas.update()
 
     def apply_rotation(self):
@@ -2182,18 +2222,29 @@ class PixelEditor(QMainWindow):
 
         if angle != 0:
             self.canvas.rotate_layer(angle)
-            self.rotation_slider.setValue(0)
-            self.rotation_label.setText("0°")
+
+        # Reset slider and preview
+        self.rotation_slider.setValue(0)
+        self.rotation_label.setText("0°")
+        self.canvas.rotation_preview_angle = 0
+        self.canvas.rotation_preview_active = False
+        self.canvas.update()
 
     def quick_rotate(self, angle):
         """Quick rotation buttons"""
         self.canvas.rotate_layer(angle)
         self.rotation_slider.setValue(0)
+        self.canvas.rotation_preview_angle = 0
+        self.canvas.rotation_preview_active = False
 
     def reset_rotation(self):
-        """Reset rotation slider"""
+        """Reset rotation slider and cancel preview"""
         self.rotation_slider.setValue(0)
         self.rotation_label.setText("0°")
+        self.canvas.rotation_preview_angle = 0
+        self.canvas.rotation_preview_active = False
+        self.canvas.update()
+        self.statusBar().showMessage("Rotation preview reset")
 
     def closeEvent(self, event):
         """Save settings on close"""
