@@ -167,6 +167,7 @@ class PixelCanvas(QWidget):
         # Rotation preview
         self.rotation_preview_angle = 0
         self.rotation_preview_active = False
+        self.smooth_rotation = True  # Default to smooth rotation
 
         # Macro recorder
         self.macro_recorder = MacroRecorder()
@@ -348,7 +349,13 @@ class PixelCanvas(QWidget):
             transform.rotate(self.rotation_preview_angle)
             transform.translate(-visible_area.width() / 2, -visible_area.height() / 2)
 
-            rotated = visible_area.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+            # Use same transformation mode as final rotation
+            if self.smooth_rotation:
+                transformation_mode = Qt.TransformationMode.SmoothTransformation
+            else:
+                transformation_mode = Qt.TransformationMode.FastTransformation
+
+            rotated = visible_area.transformed(transform, transformation_mode)
 
             # Scale and center the rotated preview
             scaled_rotated = rotated.scaled(
@@ -938,8 +945,13 @@ class PixelCanvas(QWidget):
         transform.rotate(angle)
         transform.translate(-visible_area.width() / 2, -visible_area.height() / 2)
 
-        # Rotate the visible area
-        rotated = visible_area.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+        # Rotate the visible area - use smooth_rotation setting
+        if self.smooth_rotation:
+            transformation_mode = Qt.TransformationMode.SmoothTransformation
+        else:
+            transformation_mode = Qt.TransformationMode.FastTransformation
+
+        rotated = visible_area.transformed(transform, transformation_mode)
 
         # Clear the visible area in the layer
         painter = QPainter(current_layer.pixmap)
@@ -954,6 +966,10 @@ class PixelCanvas(QWidget):
         painter.end()
 
         self.update()
+
+    def set_smooth_rotation(self, enabled):
+        """Set whether rotation should use smooth transformation"""
+        self.smooth_rotation = enabled
 
     def flip_layer(self, horizontal):
         """Flip current layer horizontally or vertically"""
@@ -1455,8 +1471,23 @@ class PixelEditor(QMainWindow):
         reset_transform_btn.clicked.connect(self.reset_rotation)
         transform_toolbar.addWidget(reset_transform_btn)
 
+        transform_toolbar.addSeparator()
+
+        # Smooth rotation checkbox
+        self.smooth_rotation_checkbox = QCheckBox("Smooth Rotation")
+        self.smooth_rotation_checkbox.setChecked(True)
+        self.smooth_rotation_checkbox.setToolTip("Enable antialiasing for rotation (disable for pixel-perfect)")
+        self.smooth_rotation_checkbox.toggled.connect(self.toggle_smooth_rotation)
+        transform_toolbar.addWidget(self.smooth_rotation_checkbox)
+
         # Store reference
         self.transform_toolbar = transform_toolbar
+
+        # Initialize canvas rotation setting
+        self.canvas.set_smooth_rotation(True)
+
+        # Initialize rotation settings
+        self.canvas.set_smooth_rotation(True)  # Default to smooth
 
         # Initialize rotation preview
         self.rotation_preview_angle = 0
@@ -2197,6 +2228,9 @@ class PixelEditor(QMainWindow):
         self.canvas.rotation_preview_angle = angle
         self.canvas.rotation_preview_active = True
 
+        # Set smooth rotation mode for preview
+        self.canvas.set_smooth_rotation(self.smooth_rotation_checkbox.isChecked())
+
         # Snap to 45° increments if Shift is pressed
         if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             angle = round(angle / 45) * 45
@@ -2220,6 +2254,9 @@ class PixelEditor(QMainWindow):
         if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             angle = round(angle / 45) * 45
 
+        # Set smooth rotation mode
+        self.canvas.set_smooth_rotation(self.smooth_rotation_checkbox.isChecked())
+
         if angle != 0:
             self.canvas.rotate_layer(angle)
 
@@ -2232,6 +2269,9 @@ class PixelEditor(QMainWindow):
 
     def quick_rotate(self, angle):
         """Quick rotation buttons"""
+        # Set smooth rotation mode
+        self.canvas.set_smooth_rotation(self.smooth_rotation_checkbox.isChecked())
+
         self.canvas.rotate_layer(angle)
         self.rotation_slider.setValue(0)
         self.canvas.rotation_preview_angle = 0
@@ -2245,6 +2285,13 @@ class PixelEditor(QMainWindow):
         self.canvas.rotation_preview_active = False
         self.canvas.update()
         self.statusBar().showMessage("Rotation preview reset")
+
+    def toggle_smooth_rotation(self, checked):
+        """Toggle smooth rotation mode"""
+        self.canvas.set_smooth_rotation(checked)
+        # Update preview if active
+        if self.canvas.rotation_preview_active:
+            self.canvas.update()
 
     def closeEvent(self, event):
         """Save settings on close"""
