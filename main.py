@@ -6,40 +6,64 @@ Professional Pixel Editor für macOS M1
 Entwickelt mit PyQt6 und modernem Python3
 """
 
+import os
 import sys
 import json
-import numpy as np
 import math
 from enum import Enum
-from dataclasses import dataclass, asdict
-from typing import List, Tuple, Optional, Dict, Any
-from pathlib import Path
+from dataclasses import dataclass
 import base64
-from io import BytesIO
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QToolBar, QDockWidget, QColorDialog, QFileDialog, QSpinBox,
+    QToolBar, QColorDialog, QFileDialog, QSpinBox,
     QLabel, QSlider, QPushButton, QListWidget, QListWidgetItem,
-    QComboBox, QMenuBar, QMenu, QGraphicsView, QGraphicsScene,
-    QGraphicsPixmapItem, QSplitter, QScrollArea, QGridLayout,
-    QButtonGroup, QToolButton, QSizePolicy, QMessageBox,
+    QMenu,QScrollArea, QGridLayout, QButtonGroup, QToolButton, QMessageBox,
     QCheckBox, QTextEdit, QDialog, QDialogButtonBox, QInputDialog
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal, QTimer, QByteArray, QBuffer, QIODevice
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal, QBuffer, QIODevice
 from PyQt6.QtGui import (
     QPainter, QPixmap, QColor, QPen, QBrush, QImage, QIcon,
-    QFont, QFontDatabase, QAction, QKeySequence, QPalette,
-    QPolygon, QTransform, QCursor
+    QFont, QAction, QKeySequence,
+    QPolygon, QTransform
 )
 
 # Konstanten
-ICON_SIZE = 32
+ICON_SIZE = 40
 BUTTON_HEIGHT = 40
 MIN_GRID_SIZE = 4
 MAX_GRID_SIZE = 256
 MAX_UNDO_STEPS = 100
 SETTINGS_FILE = "pixel_editor_settings.json"
+
+
+def load_icon(icon_name, fallback_text="?"):
+    """Lädt ein Icon aus Datei oder gibt Fallback-Text zurück"""
+    icon_path = os.path.join("icons", f"{icon_name}.png")
+    if os.path.exists(icon_path):
+        return QIcon(icon_path)
+    return None
+
+
+class IconToolButton(QToolButton):
+    def __init__(self, icon_name, fallback_text, tooltip=""):
+        super().__init__()
+
+        # Versuche Icon zu laden
+        icon = load_icon(icon_name)
+        if icon:
+            self.setIcon(icon)
+            self.setIconSize(QSize(24, 24))
+        else:
+            # Fallback zu Text/Emoji
+            self.setText(fallback_text)
+            font = QFont()
+            font.setPixelSize(18)
+            self.setFont(font)
+
+        self.setToolTip(tooltip)
+        self.setFixedSize(ICON_SIZE, ICON_SIZE)
+        self.setCheckable(True)
 
 
 class DrawMode(Enum):
@@ -1551,27 +1575,27 @@ class PixelEditor(QMainWindow):
 
         # Drawing tools
         tools_layout = QGridLayout()
-
         self.tool_buttons = QButtonGroup()
+
         tools = [
-            ("✏", DrawMode.PENCIL, "Pencil (P)"),
-            ("╱", DrawMode.LINE, "Line (L)"),
-            ("□", DrawMode.RECTANGLE, "Rectangle (R)"),
-            ("■", DrawMode.FILLED_RECTANGLE, "Filled Rectangle"),
-            ("○", DrawMode.CIRCLE, "Circle/Ellipse (C)\nShift: Perfect circle"),
-            ("●", DrawMode.FILLED_CIRCLE, "Filled Circle/Ellipse\nShift: Perfect circle"),
-            ("△", DrawMode.TRIANGLE, "Triangle\nShift: Equilateral"),
-            ("▲", DrawMode.FILLED_TRIANGLE, "Filled Triangle\nShift: Equilateral"),
-            ("⬟", DrawMode.POLYGON, "Polygon\nShift: Finish\nAlt: Regular polygon"),
-            ("⬢", DrawMode.FILLED_POLYGON, "Filled Polygon\nShift: Finish\nAlt: Regular"),
-            ("🪣", DrawMode.FILL, "Fill (F)"),
-            ("⌫", DrawMode.ERASER, "Eraser (E)"),
-            ("💧", DrawMode.PICKER, "Color Picker (I)"),
-            ("↔", DrawMode.MOVE, "Move Layer Content (M)")
+            ("pencil", "✏", DrawMode.PENCIL, "Pencil (P)"),
+            ("line", "╱", DrawMode.LINE, "Line (L)"),
+            ("rectangle", "□", DrawMode.RECTANGLE, "Rectangle (R)"),
+            ("rectangle_filled", "■", DrawMode.FILLED_RECTANGLE, "Filled Rectangle"),
+            ("circle", "○", DrawMode.CIRCLE, "Circle/Ellipse (C)"),
+            ("circle_filled", "●", DrawMode.FILLED_CIRCLE, "Filled Circle/Ellipse"),
+            ("triangle", "△", DrawMode.TRIANGLE, "Triangle"),
+            ("triangle_filled", "▲", DrawMode.FILLED_TRIANGLE, "Filled Triangle"),
+            ("polygon", "⬟", DrawMode.POLYGON, "Polygon"),
+            ("polygon_filled", "⬢", DrawMode.FILLED_POLYGON, "Filled Polygon"),
+            ("fill", "🪣", DrawMode.FILL, "Fill (F)"),
+            ("eraser", "⌫", DrawMode.ERASER, "Eraser (E)"),
+            ("picker", "💧", DrawMode.PICKER, "Color Picker (I)"),
+            ("move", "↔", DrawMode.MOVE, "Move Layer Content (M)")
         ]
 
-        for i, (icon, mode, tooltip) in enumerate(tools):
-            btn = ToolButton(icon, tooltip)
+        for i, (icon_name, fallback, mode, tooltip) in enumerate(tools):
+            btn = IconToolButton(icon_name, fallback, tooltip)
             btn.clicked.connect(lambda checked, m=mode: self.set_draw_mode(m))
             self.tool_buttons.addButton(btn)
             tools_layout.addWidget(btn, i // 2, i % 2)
