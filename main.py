@@ -36,8 +36,8 @@ from PyQt6.QtGui import (
 # Konstanten
 ICON_SIZE = 32
 BUTTON_HEIGHT = 40
-MIN_GRID_SIZE = 4
-MAX_GRID_SIZE = 256
+MIN_GRID_SIZE = 16
+MAX_GRID_SIZE = 64
 MAX_UNDO_STEPS = 100
 SETTINGS_FILE = "pixel_editor_settings.json"
 
@@ -65,6 +65,7 @@ class Layer:
     pixmap: QPixmap
     visible: bool = True
     opacity: float = 1.0
+    selected: bool = False  # For merge selection
 
     def to_dict(self):
         # Convert pixmap to base64
@@ -882,10 +883,110 @@ class PixelCanvas(QWidget):
         self.update_size()
         self.update()
 
-    def execute_action(self, action_type, params):
-        """Execute recorded macro action"""
-        # Implementation for macro playback
-        pass
+    def rotate_layer(self, angle):
+        """Rotate current layer by angle (90, -90, 180)"""
+        self.save_state()
+
+        current_layer = self.layers[self.current_layer]
+        offset = self.get_virtual_offset()
+
+        # Extract visible area
+        visible_area = current_layer.pixmap.copy(offset, offset, self.grid_size, self.grid_size)
+
+        # Create transform
+        transform = QTransform()
+        transform.rotate(angle)
+
+        # Rotate the visible area
+        rotated = visible_area.transformed(transform, Qt.TransformationMode.FastTransformation)
+
+        # Clear the layer
+        current_layer.pixmap.fill(Qt.GlobalColor.transparent)
+
+        # Calculate new position to center the rotated image
+        painter = QPainter(current_layer.pixmap)
+        new_x = offset + (self.grid_size - rotated.width()) // 2
+        new_y = offset + (self.grid_size - rotated.height()) // 2
+        painter.drawPixmap(new_x, new_y, rotated)
+        painter.end()
+
+        self.update()
+
+    def flip_layer(self, horizontal):
+        """Flip current layer horizontally or vertically"""
+        self.save_state()
+
+        current_layer = self.layers[self.current_layer]
+        offset = self.get_virtual_offset()
+
+        # Extract visible area
+        visible_area = current_layer.pixmap.copy(offset, offset, self.grid_size, self.grid_size)
+
+        # Create transform
+        transform = QTransform()
+        if horizontal:
+            transform.scale(-1, 1)
+            transform.translate(-visible_area.width(), 0)
+        else:
+            transform.scale(1, -1)
+            transform.translate(0, -visible_area.height())
+
+        # Flip the visible area
+        flipped = visible_area.transformed(transform, Qt.TransformationMode.FastTransformation)
+
+        # Clear and redraw
+        painter = QPainter(current_layer.pixmap)
+        painter.fillRect(offset, offset, self.grid_size, self.grid_size, Qt.GlobalColor.transparent)
+        painter.drawPixmap(offset, offset, flipped)
+        painter.end()
+
+        self.update()
+
+    def merge_selected_layers(self):
+        """Merge all selected layers into one"""
+        selected_indices = [i for i, layer in enumerate(self.layers) if layer.selected]
+
+        if len(selected_indices) < 2:
+            QMessageBox.warning(self, "Merge Layers",
+                                "Please select at least 2 layers to merge (Ctrl+Click to select)")
+            return
+
+        self.save_state()
+
+        # Create new merged pixmap
+        merged_pixmap = QPixmap(self.virtual_size, self.virtual_size)
+        merged_pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(merged_pixmap)
+
+        # Draw selected layers from bottom to top
+        for idx in selected_indices:
+            if self.layers[idx].visible:
+                painter.setOpacity(self.layers[idx].opacity)
+                painter.drawPixmap(0, 0, self.layers[idx].pixmap)
+
+        painter.end()
+
+        # Create new layer with merged content
+        base_names = [self.layers[i].name for i in selected_indices]
+        merged_name = f"Merged ({', '.join(base_names[:3])}{'...' if len(base_names) > 3 else ''})"
+
+        # Remove selected layers (from top to bottom to maintain indices)
+        for idx in reversed(selected_indices):
+            del self.layers[idx]
+
+        # Add merged layer
+        new_layer = Layer(merged_name, merged_pixmap)
+        self.layers.insert(min(selected_indices), new_layer)
+
+        # Update current layer
+        self.current_layer = min(selected_indices)
+
+        # Clear selections
+        for layer in self.layers:
+            layer.selected = False
+
+        self.update()
 
 
 class ColorPalette(QWidget):
@@ -1361,7 +1462,7 @@ class PixelEditor(QMainWindow):
         layout.addLayout(palette_buttons)
 
         # Layers
-        layout.addWidget(QLabel("Layers (Double-click to toggle visibility):"))
+        layout.addWidget(QLabel("Layers (Double-click: visibility, Ctrl+Click: select):"))
         self.layers_list = QListWidget()
         self.layers_list.itemClicked.connect(self.select_layer)
         self.layers_list.itemDoubleClicked.connect(self.toggle_layer_visibility_ui)
@@ -1370,12 +1471,19 @@ class PixelEditor(QMainWindow):
 
         layer_buttons = QHBoxLayout()
         add_layer_btn = QPushButton("+")
+        add_layer_btn.setToolTip("Neue Ebene hinzufügen")
         add_layer_btn.clicked.connect(self.add_layer)
         layer_buttons.addWidget(add_layer_btn)
 
         remove_layer_btn = QPushButton("-")
+        remove_layer_btn.setToolTip("Ebene entfernen")
         remove_layer_btn.clicked.connect(self.remove_layer)
         layer_buttons.addWidget(remove_layer_btn)
+
+        merge_btn = QPushButton("⬇")
+        merge_btn.setToolTip("Ausgewählte Ebenen zusammenführen")
+        merge_btn.clicked.connect(self.merge_layers)
+        layer_buttons.addWidget(merge_btn)
 
         layout.addLayout(layer_buttons)
 
@@ -1448,9 +1556,45 @@ class PixelEditor(QMainWindow):
 
         edit_menu.addSeparator()
 
+        # Transform submenu
+        transform_menu = edit_menu.addMenu("Transform")
+
+        rotate_90_action = QAction("Rotate 90° CW", self)
+        rotate_90_action.setShortcut("Ctrl+R")
+        rotate_90_action.triggered.connect(lambda: self.canvas.rotate_layer(90))
+        transform_menu.addAction(rotate_90_action)
+
+        rotate_neg90_action = QAction("Rotate 90° CCW", self)
+        rotate_neg90_action.setShortcut("Ctrl+Shift+R")
+        rotate_neg90_action.triggered.connect(lambda: self.canvas.rotate_layer(-90))
+        transform_menu.addAction(rotate_neg90_action)
+
+        rotate_180_action = QAction("Rotate 180°", self)
+        rotate_180_action.triggered.connect(lambda: self.canvas.rotate_layer(180))
+        transform_menu.addAction(rotate_180_action)
+
+        transform_menu.addSeparator()
+
+        flip_h_action = QAction("Flip Horizontal", self)
+        flip_h_action.setShortcut("Ctrl+H")
+        flip_h_action.triggered.connect(lambda: self.canvas.flip_layer(True))
+        transform_menu.addAction(flip_h_action)
+
+        flip_v_action = QAction("Flip Vertical", self)
+        flip_v_action.setShortcut("Ctrl+Shift+H")
+        flip_v_action.triggered.connect(lambda: self.canvas.flip_layer(False))
+        transform_menu.addAction(flip_v_action)
+
+        edit_menu.addSeparator()
+
         clear_layer_action = QAction("Clear Layer", self)
         clear_layer_action.triggered.connect(self.canvas.clear_layer)
         edit_menu.addAction(clear_layer_action)
+
+        merge_layers_action = QAction("Merge Selected Layers", self)
+        merge_layers_action.setShortcut("Ctrl+E")
+        merge_layers_action.triggered.connect(self.merge_layers)
+        edit_menu.addAction(merge_layers_action)
 
         reset_all_action = QAction("Reset All", self)
         reset_all_action.triggered.connect(self.canvas.reset_all)
@@ -1508,7 +1652,16 @@ class PixelEditor(QMainWindow):
             shortcut = QAction(self)
             shortcut.setShortcut(key)
             shortcut.triggered.connect(lambda checked, m=mode: self.set_draw_mode(m))
-            self.addAction(shortcut)
+        # Rotate shortcuts
+        rotate_cw = QAction(self)
+        rotate_cw.setShortcut("Ctrl+R")
+        rotate_cw.triggered.connect(lambda: self.canvas.rotate_layer(90))
+        self.addAction(rotate_cw)
+
+        rotate_ccw = QAction(self)
+        rotate_ccw.setShortcut("Ctrl+Shift+R")
+        rotate_ccw.triggered.connect(lambda: self.canvas.rotate_layer(-90))
+        self.addAction(rotate_ccw)
 
     def set_draw_mode(self, mode):
         self.canvas.draw_mode = mode
@@ -1568,20 +1721,31 @@ class PixelEditor(QMainWindow):
         self.layers_list.clear()
         for i, layer in enumerate(self.canvas.layers):
             visibility = '👁' if layer.visible else '🚫'
+            selection = '☑' if layer.selected else '☐'
             opacity = f" ({int(layer.opacity * 100)}%)" if layer.opacity < 1.0 else ""
-            item = QListWidgetItem(f"{visibility} {layer.name}{opacity}")
+            item = QListWidgetItem(f"{selection} {visibility} {layer.name}{opacity}")
             self.layers_list.addItem(item)
 
         self.layers_list.setCurrentRow(self.canvas.current_layer)
 
     def select_layer(self, item):
         row = self.layers_list.row(item)
-        self.canvas.current_layer = row
 
-        # Update opacity slider
-        if 0 <= row < len(self.canvas.layers):
-            opacity = int(self.canvas.layers[row].opacity * 100)
-            self.opacity_slider.setValue(opacity)
+        # Check if Ctrl/Cmd is pressed for multi-selection
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier:
+            # Toggle selection
+            self.canvas.layers[row].selected = not self.canvas.layers[row].selected
+            self.update_layers_list()
+        else:
+            # Normal selection - clear others
+            for layer in self.canvas.layers:
+                layer.selected = False
+            self.canvas.current_layer = row
+
+            # Update opacity slider
+            if 0 <= row < len(self.canvas.layers):
+                opacity = int(self.canvas.layers[row].opacity * 100)
+                self.opacity_slider.setValue(opacity)
 
     def toggle_layer_visibility_ui(self, item):
         row = self.layers_list.row(item)
@@ -1848,6 +2012,11 @@ class PixelEditor(QMainWindow):
 
         except:
             pass  # Use defaults if no settings file
+
+    def merge_layers(self):
+        """Merge selected layers"""
+        self.canvas.merge_selected_layers()
+        self.update_layers_list()
 
     def closeEvent(self, event):
         """Save settings on close"""
