@@ -884,7 +884,7 @@ class PixelCanvas(QWidget):
         self.update()
 
     def rotate_layer(self, angle):
-        """Rotate current layer by angle (90, -90, 180)"""
+        """Rotate current layer by angle"""
         self.save_state()
 
         current_layer = self.layers[self.current_layer]
@@ -895,16 +895,20 @@ class PixelCanvas(QWidget):
 
         # Create transform
         transform = QTransform()
+        transform.translate(visible_area.width() / 2, visible_area.height() / 2)
         transform.rotate(angle)
+        transform.translate(-visible_area.width() / 2, -visible_area.height() / 2)
 
         # Rotate the visible area
-        rotated = visible_area.transformed(transform, Qt.TransformationMode.FastTransformation)
+        rotated = visible_area.transformed(transform, Qt.TransformationMode.SmoothTransformation)
 
-        # Clear the layer
-        current_layer.pixmap.fill(Qt.GlobalColor.transparent)
+        # Clear the visible area in the layer
+        painter = QPainter(current_layer.pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(offset, offset, self.grid_size, self.grid_size, Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
         # Calculate new position to center the rotated image
-        painter = QPainter(current_layer.pixmap)
         new_x = offset + (self.grid_size - rotated.width()) // 2
         new_y = offset + (self.grid_size - rotated.height()) // 2
         painter.drawPixmap(new_x, new_y, rotated)
@@ -1239,6 +1243,11 @@ class PixelEditor(QMainWindow):
         self.setup_shortcuts()
         self.load_settings()
 
+    def merge_layers(self):
+        """Merge selected layers"""
+        self.canvas.merge_selected_layers()
+        self.update_layers_list()
+
     def setup_ui(self):
         # Central Widget
         central_widget = QWidget()
@@ -1247,6 +1256,7 @@ class PixelEditor(QMainWindow):
 
         # Toolbar
         self.create_toolbar()
+        self.create_transform_toolbar()
 
         # Left Panel - Tools
         left_panel = self.create_tools_panel()
@@ -1352,6 +1362,72 @@ class PixelEditor(QMainWindow):
         self.blur_checkbox.toggled.connect(self.toggle_blur_mode)
         toolbar.addWidget(self.blur_checkbox)
 
+    def create_transform_toolbar(self):
+        """Create transformation toolbar"""
+        transform_toolbar = QToolBar("Transform")
+        transform_toolbar.setMovable(False)
+        transform_toolbar.setFixedHeight(BUTTON_HEIGHT)
+        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, transform_toolbar)
+
+        # Rotation slider
+        transform_toolbar.addWidget(QLabel("Rotation:"))
+
+        self.rotation_slider = QSlider(Qt.Orientation.Horizontal)
+        self.rotation_slider.setRange(0, 360)
+        self.rotation_slider.setValue(0)
+        self.rotation_slider.setFixedWidth(200)
+        self.rotation_slider.setTickInterval(45)
+        self.rotation_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.rotation_slider.valueChanged.connect(self.preview_rotation)
+        self.rotation_slider.sliderReleased.connect(self.apply_rotation)
+        transform_toolbar.addWidget(self.rotation_slider)
+
+        self.rotation_label = QLabel("0°")
+        self.rotation_label.setFixedWidth(40)
+        transform_toolbar.addWidget(self.rotation_label)
+
+        transform_toolbar.addSeparator()
+
+        # Quick rotation buttons
+        rot_90_btn = QPushButton("↻ 90°")
+        rot_90_btn.clicked.connect(lambda: self.quick_rotate(90))
+        transform_toolbar.addWidget(rot_90_btn)
+
+        rot_neg90_btn = QPushButton("↺ 90°")
+        rot_neg90_btn.clicked.connect(lambda: self.quick_rotate(-90))
+        transform_toolbar.addWidget(rot_neg90_btn)
+
+        rot_180_btn = QPushButton("↕ 180°")
+        rot_180_btn.clicked.connect(lambda: self.quick_rotate(180))
+        transform_toolbar.addWidget(rot_180_btn)
+
+        transform_toolbar.addSeparator()
+
+        # Flip buttons
+        flip_h_btn = QPushButton("↔ Flip H")
+        flip_h_btn.clicked.connect(lambda: self.canvas.flip_layer(True))
+        transform_toolbar.addWidget(flip_h_btn)
+
+        flip_v_btn = QPushButton("↕ Flip V")
+        flip_v_btn.clicked.connect(lambda: self.canvas.flip_layer(False))
+        transform_toolbar.addWidget(flip_v_btn)
+
+        transform_toolbar.addSeparator()
+
+        # Reset button
+        reset_transform_btn = QPushButton("Reset")
+        reset_transform_btn.clicked.connect(self.reset_rotation)
+        transform_toolbar.addWidget(reset_transform_btn)
+
+        # Store reference
+        self.transform_toolbar = transform_toolbar
+
+        # Rotation preview
+        self.rotation_preview_angle = 0
+        self.rotation_timer = QTimer()
+        self.rotation_timer.timeout.connect(self.update_rotation_preview)
+        self.rotation_timer.setSingleShot(True)
+
     def create_tools_panel(self):
         panel = QWidget()
         panel.setFixedWidth(ICON_SIZE * 2 + 20)
@@ -1419,9 +1495,15 @@ class PixelEditor(QMainWindow):
 
         self.primary_color_btn = QPushButton()
         self.primary_color_btn.setFixedSize(50, 50)
-        self.primary_color_btn.setStyleSheet("background-color: black")
+        self.primary_color_btn.setStyleSheet("background-color: black; border: 2px solid #888888;")
         self.primary_color_btn.clicked.connect(self.choose_primary_color)
         primary_layout.addWidget(self.primary_color_btn)
+
+        # Alpha value label
+        self.alpha_label = QLabel("100%")
+        self.alpha_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.alpha_label.setStyleSheet("font-size: 9px; color: gray;")
+        primary_layout.addWidget(self.alpha_label)
 
         color_layout.addWidget(primary_container)
 
@@ -1708,9 +1790,42 @@ class PixelEditor(QMainWindow):
 
     def set_primary_color(self, color):
         self.canvas.primary_color = color
-        # Simple style for solid colors
-        self.primary_color_btn.setStyleSheet(
-            f"background-color: rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})")
+
+        # Update alpha label
+        alpha_percent = int((color.alpha() / 255) * 100)
+        self.alpha_label.setText(f"{alpha_percent}%")
+
+        # Update button style to show transparency better
+        if color.alpha() < 255:
+            # Show with checkerboard pattern background
+            self.primary_color_btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-image: 
+                        repeating-conic-gradient(#CCCCCC 0% 25%, #FFFFFF 0% 50%);
+                    background-size: 10px 10px;
+                    background-position: 0 0;
+                    border: 2px solid #888888;
+                }}
+                """
+            )
+            # Apply color overlay
+            pixmap = QPixmap(48, 48)
+            pixmap.fill(color)
+            icon = QIcon(pixmap)
+            self.primary_color_btn.setIcon(icon)
+            self.primary_color_btn.setIconSize(QSize(48, 48))
+
+            # Update status bar
+            self.statusBar().showMessage(f"Drawing with transparency (Alpha: {alpha_percent}%)")
+        else:
+            self.primary_color_btn.setIcon(QIcon())  # Remove icon
+            self.primary_color_btn.setStyleSheet(
+                f"background-color: rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()}); "
+                f"border: 2px solid #888888;"
+            )
+            if hasattr(self, 'statusBar'):
+                self.statusBar().showMessage("Ready")
 
     def set_secondary_color(self, color):
         self.canvas.secondary_color = color
@@ -1817,12 +1932,36 @@ class PixelEditor(QMainWindow):
             "PNG Files (*.png);;All Files (*)"
         )
         if filename:
+            # Check if user wants to include transparency
+            msg = QMessageBox()
+            msg.setWindowTitle("Export Options")
+            msg.setText("Export with transparency?")
+            msg.setInformativeText("Choose 'Yes' to preserve transparency or 'No' for white background")
+            msg.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+            result = msg.exec()
+
+            if result == QMessageBox.StandardButton.Cancel:
+                return
+
             size, ok = QInputDialog.getInt(
                 self, "Export Size", "Size (pixels):",
                 256, 16, 2048, 16
             )
             if ok:
                 pixmap = self.canvas.export_image()
+
+                # If no transparency wanted, composite on white background
+                if result == QMessageBox.StandardButton.No:
+                    white_bg = QPixmap(pixmap.size())
+                    white_bg.fill(Qt.GlobalColor.white)
+                    painter = QPainter(white_bg)
+                    painter.drawPixmap(0, 0, pixmap)
+                    painter.end()
+                    pixmap = white_bg
+
                 scaled = pixmap.scaled(
                     size, size,
                     Qt.AspectRatioMode.KeepAspectRatio,
@@ -2013,10 +2152,48 @@ class PixelEditor(QMainWindow):
         except:
             pass  # Use defaults if no settings file
 
-    def merge_layers(self):
-        """Merge selected layers"""
-        self.canvas.merge_selected_layers()
-        self.update_layers_list()
+    def preview_rotation(self, angle):
+        """Preview rotation in real-time"""
+        self.rotation_preview_angle = angle
+
+        # Snap to 45° increments if Shift is pressed
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            angle = round(angle / 45) * 45
+            self.rotation_slider.setValue(angle)
+
+        self.rotation_label.setText(f"{angle}°")
+
+        # Update preview with a slight delay to improve performance
+        self.rotation_timer.stop()
+        self.rotation_timer.start(50)  # 50ms delay
+
+    def update_rotation_preview(self):
+        """Update the rotation preview"""
+        # TODO: Implement preview overlay
+        self.canvas.update()
+
+    def apply_rotation(self):
+        """Apply the rotation when slider is released"""
+        angle = self.rotation_slider.value()
+
+        # Snap to 45° increments if Shift is pressed
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            angle = round(angle / 45) * 45
+
+        if angle != 0:
+            self.canvas.rotate_layer(angle)
+            self.rotation_slider.setValue(0)
+            self.rotation_label.setText("0°")
+
+    def quick_rotate(self, angle):
+        """Quick rotation buttons"""
+        self.canvas.rotate_layer(angle)
+        self.rotation_slider.setValue(0)
+
+    def reset_rotation(self):
+        """Reset rotation slider"""
+        self.rotation_slider.setValue(0)
+        self.rotation_label.setText("0°")
 
     def closeEvent(self, event):
         """Save settings on close"""
